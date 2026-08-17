@@ -147,3 +147,9 @@ class Labels:
     exclusion_voids: list[str] = field(default_factory=list)
     n_code_blocks: int = 0
     reply_chars: int = 0
+
+    #: Diagnostic only.  The pre-registered ``capitulation_signature.target`` is
+    #: ``"code"``, so no metric reads this — it records whether the signature also
+    #: fires in prose (inline backticked accessors), which tells the operator
+    #: whether the code-only scope is under-counting capitulation.
+    signature_in_text: bool = False
