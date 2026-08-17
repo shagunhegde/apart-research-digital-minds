@@ -306,16 +306,49 @@ def option_variants(word: str) -> list[str]:
     return [f for w in forms for f in (w, " " + w)]
 
 
+#: Space markers used by the two tokenizer families this is likely to meet:
+#: SentencePiece writes a leading space as U+2581, byte-level BPE as U+0120.
+SPACE_MARKERS = ("▁", "Ġ")
+
+
+def is_blank_piece(tokenizer: Any, token_id: int) -> bool:
+    """Is this token pure whitespace — a standalone space rather than content?"""
+    try:
+        piece = tokenizer.convert_ids_to_tokens(int(token_id))
+    except Exception:  # pragma: no cover - tokenizer-dependent
+        piece = tokenizer.decode([int(token_id)])
+    if not piece:
+        return False
+    for marker in SPACE_MARKERS:
+        piece = piece.replace(marker, " ")
+    return piece.strip() == ""
+
+
 def first_token_ids(tokenizer: Any, word: str) -> list[int]:
-    """Deduped first-token ids across all variants of ``word``.
+    """Deduped first *content-bearing* token ids across all variants of ``word``.
 
     Logit reads in §5 sum probability mass over exactly this set.
+
+    A leading-space variant does not always merge into one token, and the difference
+    matters: Gemma tokenizes digits individually with no merged ``▁0`` piece, so
+    ``" 0"`` encodes as ``[space, "0"]`` while ``" yes"`` encodes as the single piece
+    ``▁yes``.  Taking ``enc[0]`` blindly would put the standalone space token in every
+    digit's id set — shared across all ten, and evidence for none of them.  Skip
+    leading whitespace and take the first token that actually carries the option.
+
+    A caveat this cannot fix, only surface: if the model's first generated token
+    really is a space, the restricted softmax is conditioning on that not happening.
+    :meth:`OptionReadout.total_mass` reports the absolute mass on the option set for
+    exactly this reason, and the gate table prints it.
     """
     ids: list[int] = []
     for variant in option_variants(word):
-        enc = tokenizer.encode(variant, add_special_tokens=False)
-        if enc and enc[0] not in ids:
-            ids.append(enc[0])
+        for token_id in tokenizer.encode(variant, add_special_tokens=False):
+            if is_blank_piece(tokenizer, token_id):
+                continue
+            if token_id not in ids:
+                ids.append(token_id)
+            break
     return ids
 
 
@@ -349,13 +382,28 @@ def assert_tokenizer_invariant(bank: Bank, tokenizer: Any) -> dict[str, dict[str
             for b in names[i + 1 :]:
                 shared = set(ids[a]) & set(ids[b])
                 if shared:
-                    problems.append(f"{set_name}: {a!r} and {b!r} share first token ids {sorted(shared)}")
+                    # Show the offending pieces: a bare id says nothing about *why*
+                    # two options collided, and the cause is nearly always a
+                    # tokenisation quirk that is obvious once you can see the piece.
+                    pieces = ", ".join(
+                        f"{t}={_piece_repr(tokenizer, t)}" for t in sorted(shared)
+                    )
+                    problems.append(
+                        f"{set_name}: {a!r} and {b!r} share first token ids [{pieces}]"
+                    )
     if problems:
         raise BankError(
             "tokenizer invariant failed (loader_contract.validation_invariants #6):\n  - "
             + "\n  - ".join(problems)
         )
     return table
+
+
+def _piece_repr(tokenizer: Any, token_id: int) -> str:
+    try:
+        return repr(tokenizer.convert_ids_to_tokens(int(token_id)))
+    except Exception:  # pragma: no cover - tokenizer-dependent
+        return repr(tokenizer.decode([int(token_id)]))
 
 
 __all__ = [
